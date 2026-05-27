@@ -1,62 +1,110 @@
 <?php
-// includes/raise_ticket.php — AJAX: user raises a ticket
-// FIXED: robust error handling, no silent crashes
+// includes/raise_ticket.php — DEBUG VERSION
+// Replace your current file with this, submit the form once,
+// then send me the exact error message you see.
 
-// Catch ALL errors and return JSON instead of crashing
+// Catch everything — no silent failures
+ini_set('display_errors', 1);
+error_reporting(E_ALL);
+
 set_error_handler(function($errno, $errstr, $errfile, $errline) {
     header('Content-Type: application/json');
-    echo json_encode(['success' => false, 'message' => "PHP Error: $errstr in $errfile line $errline"]);
+    echo json_encode([
+        'success' => false,
+        'message' => "PHP Error [$errno]: $errstr",
+        'file'    => $errfile,
+        'line'    => $errline
+    ]);
     exit;
 });
+
 set_exception_handler(function($e) {
     header('Content-Type: application/json');
-    echo json_encode(['success' => false, 'message' => "Exception: " . $e->getMessage() . " in " . $e->getFile() . " line " . $e->getLine()]);
+    echo json_encode([
+        'success' => false,
+        'message' => "Exception: " . $e->getMessage(),
+        'file'    => $e->getFile(),
+        'line'    => $e->getLine()
+    ]);
     exit;
 });
 
-require_once __DIR__ . '/db.php';
-require_once __DIR__ . '/auth_guard.php';
-require_once __DIR__ . '/ticket_helpers.php';
-
-guard_require_login();
-
+// Force JSON header immediately
 header('Content-Type: application/json');
 
+// Step 1 — can we load db.php?
+$dbPath = __DIR__ . '/db.php';
+if (!file_exists($dbPath)) {
+    echo json_encode(['success'=>false,'message'=>'MISSING FILE: includes/db.php not found at '.$dbPath]); exit;
+}
+require_once $dbPath;
+
+// Step 2 — session started? user logged in?
+if (session_status() === PHP_SESSION_NONE) session_start();
+if (empty($_SESSION['user_id'])) {
+    echo json_encode(['success'=>false,'message'=>'NOT LOGGED IN — session has no user_id. Session data: '.json_encode($_SESSION)]); exit;
+}
+
+// Step 3 — ticket_helpers exists?
+$helpersPath = __DIR__ . '/ticket_helpers.php';
+if (!file_exists($helpersPath)) {
+    echo json_encode(['success'=>false,'message'=>'MISSING FILE: includes/ticket_helpers.php not found at '.$helpersPath]); exit;
+}
+require_once $helpersPath;
+
+// Step 4 — correct request method?
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    echo json_encode(['success' => false, 'message' => 'Invalid request method.']); exit;
+    echo json_encode(['success'=>false,'message'=>'Wrong method: '.$_SERVER['REQUEST_METHOD']]); exit;
 }
 
-// CSRF check — csrf_verify() dies with http 403 which breaks JSON.
-// Do it manually instead so we always return JSON.
+// Step 5 — CSRF check (manual so it returns JSON not 403)
 $token = $_POST['csrf_token'] ?? '';
-if (!isset($_SESSION['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $token)) {
-    echo json_encode(['success' => false, 'message' => 'Invalid CSRF token. Please refresh the page and try again.']); exit;
+if (empty($token)) {
+    echo json_encode(['success'=>false,'message'=>'CSRF token missing from POST. POST keys received: '.implode(', ', array_keys($_POST))]); exit;
+}
+if (!isset($_SESSION['csrf_token'])) {
+    echo json_encode(['success'=>false,'message'=>'No csrf_token in session. Session keys: '.implode(', ', array_keys($_SESSION))]); exit;
+}
+if (!hash_equals($_SESSION['csrf_token'], $token)) {
+    echo json_encode(['success'=>false,'message'=>'CSRF token mismatch. Expected: '.$_SESSION['csrf_token'].' Got: '.$token]); exit;
 }
 
+// Step 6 — validate input
 $title       = trim($_POST['title']       ?? '');
 $description = trim($_POST['description'] ?? '');
 $categoryId  = !empty($_POST['category_id']) ? (int)$_POST['category_id'] : null;
 
 if (!$title || !$description) {
-    echo json_encode(['success' => false, 'message' => 'Title and description are required.']); exit;
+    echo json_encode(['success'=>false,'message'=>'Title or description empty.']); exit;
 }
 
-// Get lowest-order level
-$firstLevel = $pdo->query("SELECT id FROM ticket_levels ORDER BY level_order ASC LIMIT 1")->fetchColumn();
+// Step 7 — check ticket_levels table exists and has rows
+try {
+    $firstLevel = $pdo->query("SELECT id FROM ticket_levels ORDER BY level_order ASC LIMIT 1")->fetchColumn();
+} catch (Exception $e) {
+    echo json_encode(['success'=>false,'message'=>'DB error on ticket_levels: '.$e->getMessage().'. Have you run ticket_schema_fixed.sql?']); exit;
+}
+
 if (!$firstLevel) {
-    echo json_encode(['success' => false, 'message' => 'No ticket levels configured yet. Ask the system admin to set up ticket levels first.']); exit;
+    echo json_encode(['success'=>false,'message'=>'ticket_levels table is empty. Go to System Admin → Ticket Config and add at least one level.']); exit;
 }
 
-$pdo->prepare("INSERT INTO tickets (title, description, category_id, raised_by) VALUES (?,?,?,?)")
-    ->execute([$title, $description, $categoryId, $_SESSION['user_id']]);
-$ticketId = (int)$pdo->lastInsertId();
+// Step 8 — insert ticket
+try {
+    $pdo->prepare("INSERT INTO tickets (title, description, category_id, raised_by) VALUES (?,?,?,?)")
+        ->execute([$title, $description, $categoryId, $_SESSION['user_id']]);
+    $ticketId = (int)$pdo->lastInsertId();
+} catch (Exception $e) {
+    echo json_encode(['success'=>false,'message'=>'DB error inserting ticket: '.$e->getMessage()]); exit;
+}
 
-logTicketActivity($pdo, $ticketId, $_SESSION['user_id'], 'raised', null, null, null, null, 'Ticket raised by user.');
-
+// Step 9 — log and assign
+logTicketActivity($pdo, $ticketId, $_SESSION['user_id'], 'raised', null, null, null, null, 'Ticket raised.');
 $assigned = assignTicketToLevel($pdo, $ticketId, (int)$firstLevel);
 
-if ($assigned === false) {
-    echo json_encode(['success' => true, 'message' => 'Ticket raised! No admins assigned to Level 1 yet — an admin will pick it up soon.', 'ticket_id' => $ticketId]);
-} else {
-    echo json_encode(['success' => true, 'message' => 'Ticket raised successfully!', 'ticket_id' => $ticketId]);
-}
+echo json_encode([
+    'success'   => true,
+    'message'   => 'Ticket #'.$ticketId.' raised successfully!',
+    'ticket_id' => $ticketId,
+    'assigned_to_admin' => $assigned
+]);
