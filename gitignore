@@ -1,0 +1,35 @@
+# ============================================================
+# G&G Support Portal — .gitignore
+# ============================================================
+
+# Database credentials — NEVER commit this
+includes/db.php
+
+# User uploaded files — too large for git, regenerated at runtime
+uploads/*
+!uploads/.gitkeep
+
+# Generated hash file — security risk
+generate_hash.php
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# PHP error logs
+*.log
+error_log
+
+# XAMPP / server config
+.htpasswd
+
+# Environment files
+.env
+*.env
